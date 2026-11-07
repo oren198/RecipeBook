@@ -1,0 +1,117 @@
+# Public tests and an ARM64 build check. This workflow does not deploy and
+# does not push an image or upload a package artifact.
+# Fork pull requests run the test job only. pull_request_target is not used.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: lint, test, and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: recipes
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: recipes
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U recipes -d recipes"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      RECIPE_EXTRACT_PROVIDER: none
+      UPLOAD_DIR: ${{ github.workspace }}/data/uploads
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Create the integration database
+        run: |
+          node --input-type=module <<'NODE'
+          import postgres from "postgres";
+          const sql = postgres("postgres://recipes:ci-only-not-a-secret@127.0.0.1:5432/recipes", { max: 1 });
+          await sql.unsafe("CREATE DATABASE recipes_test");
+          await sql.end();
+          NODE
+
+      - name: Generate a session secret
+        run: |
+          umask 077
+          openssl rand -base64 32 | tr -d '\n' > "$RUNNER_TEMP/session_secret"
+
+      - name: Typecheck, lint, unit, integration, browser, production build
+        env:
+          DATABASE_URL: postgres://recipes:ci-only-not-a-secret@127.0.0.1:5432/recipes
+        run: |
+          set -euo pipefail
+          export SESSION_SECRET="$(cat "$RUNNER_TEMP/session_secret")"
+          test "${#SESSION_SECRET}" -ge 32
+          npm run typecheck
+          npm run lint
+          DATABASE_URL="postgres://recipes:ci-only-not-a-secret@127.0.0.1:5432/recipes_test" npm test
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+          npm run build
+
+  arm64:
+    name: ARM64 image build
+    needs: checks
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build linux/arm64 without publishing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: false
+          provenance: false
+          sbom: false
+          outputs: type=oci,dest=/tmp/family-recipes-arm64.oci
+
+      - name: Discard the local image
+        run: |
+          test -s /tmp/family-recipes-arm64.oci
+          rm -f /tmp/family-recipes-arm64.oci

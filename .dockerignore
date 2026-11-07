@@ -1,0 +1,16 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+node_modules
+.next
+data
+public-export
+private
+agent-tools
+test-results
+playwright-report
+blob-report
+coverage
+*.pem
