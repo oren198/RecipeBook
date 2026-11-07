@@ -175,4 +175,31 @@ describe("pinned request limits", () => {
     ).rejects.toMatchObject({ code: "timeout" });
     stalled.close();
   });
+
+  it("connects to the pinned address when the URL has a hostname", async () => {
+    // Node 20+ connects with autoSelectFamily, which calls lookup with
+    // { all: true } and expects an address array. A real import always has a
+    // hostname, so the literal-IP tests above never exercise the pinned lookup.
+    const server = createServer((req, res) => {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<p>${req.headers.host}</p>`);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+    try {
+      const response = await defaultPinnedRequest({
+        url: new URL(`http://recipes.example:${address.port}/r`),
+        address: "127.0.0.1",
+        headers: {},
+        timeoutMs: 2000,
+        maxBytes: 10_000,
+      });
+      expect(response.status).toBe(200);
+      expect(response.body.toString()).toBe(`<p>recipes.example:${address.port}</p>`);
+    } finally {
+      server.close();
+    }
+  });
 });

@@ -130,6 +130,14 @@ function pinnedLookup(address: string): LookupFunction {
   return ((hostname, options, callback) => {
     const done = typeof options === "function" ? options : callback;
     if (!done) return;
+    // net.connect uses autoSelectFamily by default since Node 20 and then calls
+    // lookup with { all: true }, which expects an array of addresses.
+    if (typeof options === "object" && options !== null && (options as { all?: boolean }).all) {
+      (done as unknown as (err: null, addresses: { address: string; family: number }[]) => void)(null, [
+        { address, family },
+      ]);
+      return;
+    }
     done(null, address, family);
   }) as LookupFunction;
 }
